@@ -2,6 +2,7 @@
 requests: 
   [{
     proportion: 1,
+    name: "google",
     requests: [
       {
         url: "https://www.google.com",

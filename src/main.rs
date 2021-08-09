@@ -20,6 +20,8 @@ struct RequestGroup {
 }
 struct RankedRequest {
     proportion: usize,
+    /// used to tabulate statists
+    name: String,
     requests: Vec<Request>,
 }
 
@@ -37,6 +39,7 @@ pub struct DRequest {
 #[derive(Clone, Debug, Deserialize)]
 pub struct DRankedRequest {
     pub proportion: usize,
+    pub name: String,
     pub requests: Vec<DRequest>,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -53,14 +56,14 @@ impl TryFrom<&DRankedRequest> for RankedRequest {
         let mut requests = vec![];
         for r in request.requests.iter() {
             let res: Result<Request, _> = r.try_into();
-            if res.is_ok() {
-                requests.push(res.unwrap());
-            } else {
-                return Err(res.err().unwrap());
+            match res {
+                Ok(req) => requests.push(req),
+                Err(err) => return Err(err),
             }
         }
         Ok(Self {
             proportion: request.proportion,
+            name: request.name.clone(),
             requests,
         })
     }
@@ -71,10 +74,9 @@ impl TryFrom<DRequestGroup> for RequestGroup {
         let mut requests = vec![];
         for r in request.requests.iter() {
             let res: Result<RankedRequest, _> = r.try_into();
-            if res.is_ok() {
-                requests.push(res.unwrap());
-            } else {
-                return Err(res.err().unwrap());
+            match res {
+                Ok(req) => requests.push(req),
+                Err(err) => return Err(err),
             }
         }
         Ok(Self {
@@ -101,11 +103,11 @@ enum RequestStatus {
     Timeout,
     Other,
 }
-async fn run_request_group(group: &RequestGroup) -> Vec<Vec<RequestStatus>> {
+async fn run_request_group(group: &RequestGroup) -> Vec<(String, Vec<RequestStatus>)> {
     let requests = group
         .requests
         .iter()
-        .map(|request| vec![request.requests.clone(); request.proportion])
+        .map(|request| vec![(request.requests.clone(), request.name.clone()); request.proportion])
         .flatten()
         .collect::<Vec<_>>();
     assert_ne!(requests.len(), 0);
@@ -117,11 +119,18 @@ async fn run_request_group(group: &RequestGroup) -> Vec<Vec<RequestStatus>> {
             distribution.sample(&mut rng),
         )
     });
-    let delay_times = join_all(
-        times.map(|(starting_delay, index)| run_request_chain(starting_delay, &requests[index])),
-    )
+    let mut names = vec![];
+    let mut delay_times = join_all(times.map(|(starting_delay, index)| {
+        names.push(requests[index].1.clone());
+        run_request_chain(starting_delay, &requests[index].0)
+    }))
     .await;
+
     delay_times
+        .drain(..)
+        .enumerate()
+        .map(|(idx, res)| (names[idx].clone(), res))
+        .collect()
 }
 async fn run_request_chain(starting_delay: Duration, requests: &[Request]) -> Vec<RequestStatus> {
     sleep(starting_delay).await;
@@ -141,7 +150,7 @@ async fn get_url(uri: Uri) -> RequestStatus {
 
     if status.is_ok() {
         let mut resp = status.unwrap();
-        while let Some(_) = resp.body_mut().data().await {}
+        while resp.body_mut().data().await.is_some() {}
         RequestStatus::Sucess {
             url: format!("{}", uri),
             delay: now.elapsed(),
@@ -157,7 +166,72 @@ async fn get_url(uri: Uri) -> RequestStatus {
         }
     }
 }
-
+struct StatisticsClient {
+    pub name: String,
+    pub average_total_load_time: Duration,
+    pub standard_deviation: Duration,
+}
+struct Statistics {
+    pub clients: Vec<StatisticsClient>,
+}
+impl std::fmt::Display for Statistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{0:<10} | {1:<20} | {2:<10}",
+            "name", "avg load time (s)", "std dev (s)"
+        )?;
+        for c in self.clients.iter() {
+            write!(
+                f,
+                "\n{0:<10} | {1:<20} | {2:<10}",
+                c.name,
+                c.average_total_load_time.as_secs_f64(),
+                c.standard_deviation.as_secs_f64()
+            )?
+        }
+        Ok(())
+    }
+}
+fn get_stat(data: &[(String, Vec<RequestStatus>)]) -> Statistics {
+    Statistics {
+        clients: data
+            .iter()
+            .map(|(name, requests)| {
+                let num_sucess = requests
+                    .iter()
+                    .filter_map(|req| match req {
+                        RequestStatus::Sucess { delay, .. } => Some(delay),
+                        _ => None,
+                    })
+                    .count();
+                let mean = requests
+                    .iter()
+                    .filter_map(|req| match req {
+                        RequestStatus::Sucess { delay, .. } => Some(delay),
+                        _ => None,
+                    })
+                    .fold(Duration::default(), |acc, req| acc + *req)
+                    / num_sucess as u32;
+                let standard_deviation: f64 = (requests
+                    .iter()
+                    .filter_map(|req| match req {
+                        RequestStatus::Sucess { delay, .. } => Some(delay),
+                        _ => None,
+                    })
+                    .map(|r| (r.as_secs_f64() - mean.as_secs_f64()).powi(2))
+                    .sum::<f64>()
+                    / (num_sucess as f64))
+                    .sqrt();
+                StatisticsClient {
+                    name: name.clone(),
+                    average_total_load_time: mean,
+                    standard_deviation: Duration::from_secs_f64(standard_deviation),
+                }
+            })
+            .collect(),
+    }
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let matches = App::new("Amawk")
@@ -174,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .short("o")
                 .help("Specifies output Format")
                 .possible_value("json")
+                .possible_value("stat")
                 .default_value("json"),
         )
         .get_matches();
@@ -188,6 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "{}",
         match matches.value_of("output").unwrap() {
             "json" => serde_json::to_string(&status).expect("failed to parse into valid json"),
+            "stat" => format!("{}", get_stat(&status)),
             _ => String::new(),
         }
     );
