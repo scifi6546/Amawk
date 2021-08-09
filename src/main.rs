@@ -4,12 +4,12 @@ use hyper::body::HttpBody as _;
 use hyper::{Client, Uri};
 use hyper_tls::HttpsConnector;
 use rand::distributions::{Distribution, Uniform};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     convert::{TryFrom, TryInto},
     time::{Duration, Instant},
 };
-use tokio::time::sleep;
+use tokio::{fs::File, io::AsyncReadExt, time::sleep};
 
 struct RequestGroup {
     requests: Vec<RankedRequest>,
@@ -39,6 +39,7 @@ pub struct DRankedRequest {
     pub proportion: usize,
     pub requests: Vec<DRequest>,
 }
+#[derive(Clone, Debug, Deserialize)]
 pub struct DRequestGroup {
     pub requests: Vec<DRankedRequest>,
     /// Total number of requests to send
@@ -93,14 +94,14 @@ impl TryFrom<&DRequest> for Request {
         })
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 enum RequestStatus {
-    Sucess { delay: Duration, uri: Uri },
+    Sucess { delay: Duration, url: String },
     HttpParseError,
     Timeout,
     Other,
 }
-async fn run_request_group(group: &RequestGroup) {
+async fn run_request_group(group: &RequestGroup) -> Vec<Vec<RequestStatus>> {
     let requests = group
         .requests
         .iter()
@@ -108,9 +109,6 @@ async fn run_request_group(group: &RequestGroup) {
         .flatten()
         .collect::<Vec<_>>();
     assert_ne!(requests.len(), 0);
-    for r in requests.iter() {
-        println!("{:?}", r);
-    }
     let mut rng = rand::thread_rng();
     let distribution = Uniform::from(0..requests.len());
     let times = (0..group.number_of_requests).map(|_| {
@@ -123,7 +121,7 @@ async fn run_request_group(group: &RequestGroup) {
         times.map(|(starting_delay, index)| run_request_chain(starting_delay, &requests[index])),
     )
     .await;
-    println!("{:?}", delay_times);
+    delay_times
 }
 async fn run_request_chain(starting_delay: Duration, requests: &[Request]) -> Vec<RequestStatus> {
     sleep(starting_delay).await;
@@ -145,7 +143,7 @@ async fn get_url(uri: Uri) -> RequestStatus {
         let mut resp = status.unwrap();
         while let Some(_) = resp.body_mut().data().await {}
         RequestStatus::Sucess {
-            uri,
+            url: format!("{}", uri),
             delay: now.elapsed(),
         }
     } else {
@@ -167,38 +165,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .author("Nicholas Alexeev")
         .arg(
             Arg::with_name("config")
+                .short("c")
                 .help("YML flile that speficfies tests to run")
                 .default_value("config.yml"),
         )
+        .arg(
+            Arg::with_name("output")
+                .short("o")
+                .help("Specifies output Format")
+                .possible_value("json")
+                .default_value("json"),
+        )
         .get_matches();
     let config_file_path = matches.value_of("config").unwrap();
-    println!("file path: {}", config_file_path);
-    run_request_group(&RequestGroup {
-        requests: vec![
-            RankedRequest {
-                requests: vec![
-                    Request {
-                        uri: "https://earthquake.alaska.edu".parse()?,
-                        delay: Duration::from_millis(10),
-                    },
-                    Request {
-                        uri: "https://earthquake.alaska.edu/misc/jquery.js?v=1.4.4".parse()?,
-                        delay: Duration::from_millis(0),
-                    },
-                ],
-                proportion: 1,
-            },
-            RankedRequest {
-                requests: vec![Request {
-                    uri: "https://google.com".parse()?,
-                    delay: Duration::from_millis(0),
-                }],
-                proportion: 2,
-            },
-        ],
-        number_of_requests: 10,
-        duration: Duration::from_secs(1),
-    })
-    .await;
+    let mut file = File::open(config_file_path).await?;
+    let mut file_contents = String::new();
+    file.read_to_string(&mut file_contents).await?;
+    let parsed_config: DRequestGroup = serde_yaml::from_str(&file_contents)?;
+    let request_group: RequestGroup = parsed_config.try_into().expect("Failed to Parse");
+    let status = run_request_group(&request_group).await;
+    println!(
+        "{}",
+        match matches.value_of("output").unwrap() {
+            "json" => serde_json::to_string(&status).expect("failed to parse into valid json"),
+            _ => String::new(),
+        }
+    );
     Ok(())
 }
