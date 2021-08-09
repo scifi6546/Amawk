@@ -6,6 +6,7 @@ use hyper_tls::HttpsConnector;
 use rand::distributions::{Distribution, Uniform};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     convert::{TryFrom, TryInto},
     time::{Duration, Instant},
 };
@@ -103,7 +104,7 @@ enum RequestStatus {
     Timeout,
     Other,
 }
-async fn run_request_group(group: &RequestGroup) -> Vec<(String, Vec<RequestStatus>)> {
+async fn run_request_group(group: &RequestGroup) -> HashMap<String, Vec<Vec<RequestStatus>>> {
     let requests = group
         .requests
         .iter()
@@ -125,12 +126,14 @@ async fn run_request_group(group: &RequestGroup) -> Vec<(String, Vec<RequestStat
         run_request_chain(starting_delay, &requests[index].0)
     }))
     .await;
-
-    delay_times
-        .drain(..)
-        .enumerate()
-        .map(|(idx, res)| (names[idx].clone(), res))
-        .collect()
+    let mut status_out = HashMap::new();
+    for (idx, delay) in delay_times.drain(..).enumerate() {
+        if !status_out.contains_key(&names[idx]) {
+            status_out.insert(names[idx].clone(), vec![]);
+        }
+        status_out.get_mut(&names[idx]).unwrap().push(delay);
+    }
+    return status_out;
 }
 async fn run_request_chain(starting_delay: Duration, requests: &[Request]) -> Vec<RequestStatus> {
     sleep(starting_delay).await;
@@ -193,28 +196,42 @@ impl std::fmt::Display for Statistics {
         Ok(())
     }
 }
-fn get_stat(data: &[(String, Vec<RequestStatus>)]) -> Statistics {
+fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
+    let get_chain_status = |s: &[RequestStatus]| {
+        let mut duration = Duration::default();
+        for status in s.iter() {
+            match status {
+                RequestStatus::Sucess { delay, .. } => duration += *delay,
+                RequestStatus::HttpParseError => return RequestStatus::HttpParseError,
+                RequestStatus::Timeout => return RequestStatus::Timeout,
+                RequestStatus::Other => return RequestStatus::Other,
+            }
+        }
+        return RequestStatus::Sucess {
+            delay: duration,
+            url: String::new(),
+        };
+    };
     Statistics {
         clients: data
             .iter()
             .map(|(name, requests)| {
                 let num_sucess = requests
                     .iter()
-                    .filter_map(|req| match req {
-                        RequestStatus::Sucess { delay, .. } => Some(delay),
-                        _ => None,
-                    })
+                    .map(|r_chain| get_chain_status(r_chain))
                     .count();
                 let mean = requests
                     .iter()
+                    .map(|r_chain| get_chain_status(r_chain))
                     .filter_map(|req| match req {
                         RequestStatus::Sucess { delay, .. } => Some(delay),
                         _ => None,
                     })
-                    .fold(Duration::default(), |acc, req| acc + *req)
+                    .fold(Duration::default(), |acc, req| acc + req)
                     / num_sucess as u32;
                 let standard_deviation: f64 = (requests
                     .iter()
+                    .map(|r_chain| get_chain_status(r_chain))
                     .filter_map(|req| match req {
                         RequestStatus::Sucess { delay, .. } => Some(delay),
                         _ => None,

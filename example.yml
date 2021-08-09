@@ -10,5 +10,5 @@ requests:
       }
     ]
   }]
-number_of_requests: 1
+number_of_requests: 40
 duration_s: 1.0
