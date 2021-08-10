@@ -171,8 +171,10 @@ async fn get_url(uri: Uri) -> RequestStatus {
 }
 struct StatisticsClient {
     pub name: String,
+    pub total: u64,
     pub average_total_load_time: Duration,
     pub standard_deviation: Duration,
+    pub number_of_failed_requests: u64,
 }
 struct Statistics {
     pub clients: Vec<StatisticsClient>,
@@ -181,16 +183,22 @@ impl std::fmt::Display for Statistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{0:<10} | {1:<20} | {2:<10}",
-            "name", "avg load time (s)", "std dev (s)"
+            "{0:<10}| {1:<30} | {2:<20} | {3:<20} | {4:<10}",
+            "name",
+            "total number of requests",
+            "avg load time (s)",
+            "std dev (s)",
+            "number of failed requests"
         )?;
         for c in self.clients.iter() {
             write!(
                 f,
-                "\n{0:<10} | {1:<20} | {2:<10}",
+                "\n{0:<10}| {1:<30} | {2:<20} | {3:<20} | {4:<10}",
                 c.name,
+                c.total,
                 c.average_total_load_time.as_secs_f64(),
-                c.standard_deviation.as_secs_f64()
+                c.standard_deviation.as_secs_f64(),
+                c.number_of_failed_requests
             )?
         }
         Ok(())
@@ -240,10 +248,21 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                     .sum::<f64>()
                     / (num_sucess as f64))
                     .sqrt();
+                let number_of_failed_requests = requests
+                    .iter()
+                    .map(|r_chain| get_chain_status(r_chain))
+                    .filter_map(|req| match req {
+                        RequestStatus::Sucess { .. } => None,
+                        _ => Some(()),
+                    })
+                    .count() as u64;
+                let total = requests.len() as u64;
                 StatisticsClient {
                     name: name.clone(),
                     average_total_load_time: mean,
+                    total,
                     standard_deviation: Duration::from_secs_f64(standard_deviation),
+                    number_of_failed_requests,
                 }
             })
             .collect(),
