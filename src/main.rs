@@ -6,7 +6,7 @@ use hyper_tls::HttpsConnector;
 use rand::distributions::{Distribution, Uniform};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     convert::{TryFrom, TryInto},
     time::{Duration, Instant},
 };
@@ -97,12 +97,30 @@ impl TryFrom<&DRequest> for Request {
         })
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
 enum RequestStatus {
     Sucess { delay: Duration, url: String },
     HttpParseError,
     Timeout,
     Other,
+}
+impl std::fmt::Display for RequestStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Sucess { delay, url } => format!(
+                    "Success{{duration: {}, url: {} }}",
+                    delay.as_secs_f64(),
+                    url
+                ),
+                Self::HttpParseError => "HttpParseError".to_string(),
+                Self::Timeout => "Timeout".to_string(),
+                Self::Other => "Other".to_string(),
+            }
+        )
+    }
 }
 async fn run_request_group(group: &RequestGroup) -> HashMap<String, Vec<Vec<RequestStatus>>> {
     let requests = group
@@ -175,6 +193,7 @@ struct StatisticsClient {
     pub average_total_load_time: Duration,
     pub standard_deviation: Duration,
     pub number_of_failed_requests: u64,
+    pub common_errors: Vec<RequestStatus>,
 }
 struct Statistics {
     pub clients: Vec<StatisticsClient>,
@@ -183,22 +202,28 @@ impl std::fmt::Display for Statistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{0:<10}| {1:<30} | {2:<20} | {3:<20} | {4:<10}",
+            "{:<10}| {:<30} | {:<20} | {:<20} | {:<25} | {:<30}",
             "name",
             "total number of requests",
             "avg load time (s)",
             "std dev (s)",
-            "number of failed requests"
+            "number of failed requests",
+            "Common Errors"
         )?;
         for c in self.clients.iter() {
             write!(
                 f,
-                "\n{0:<10}| {1:<30} | {2:<20} | {3:<20} | {4:<10}",
+                "\n{:<10}| {:<30} | {:<20} | {:<20} | {:<25} | {:<30}",
                 c.name,
                 c.total,
                 c.average_total_load_time.as_secs_f64(),
                 c.standard_deviation.as_secs_f64(),
-                c.number_of_failed_requests
+                c.number_of_failed_requests,
+                c.common_errors
+                    .iter()
+                    .take(2)
+                    .map(|e| format!("{}", e))
+                    .fold(String::new(), |acc, x| acc + &x)
             )?
         }
         Ok(())
@@ -232,6 +257,31 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                         _ => None,
                     })
                     .count();
+                let errors = requests
+                    .iter()
+                    .map(|r_chain| get_chain_status(r_chain))
+                    .filter_map(|req| match req {
+                        RequestStatus::Sucess { .. } => None,
+                        RequestStatus::HttpParseError => Some(RequestStatus::HttpParseError),
+                        RequestStatus::Timeout => Some(RequestStatus::Timeout),
+                        RequestStatus::Other => Some(RequestStatus::Other),
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut error_hashmap: HashMap<RequestStatus, usize> = HashMap::new();
+                for e in errors.iter() {
+                    if error_hashmap.contains_key(e) {
+                        *error_hashmap.get_mut(e).unwrap() += 1;
+                    } else {
+                        error_hashmap.insert(e.clone(), 0);
+                    }
+                }
+                let error_tree: BTreeMap<usize, RequestStatus> =
+                    error_hashmap.iter().map(|(k, v)| (*v, k.clone())).collect();
+                let common_errors = error_tree
+                    .iter()
+                    .map(|(_key, error)| error.clone())
+                    .collect();
                 let mean = requests
                     .iter()
                     .map(|r_chain| get_chain_status(r_chain))
@@ -265,6 +315,7 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                     name: name.clone(),
                     average_total_load_time: mean,
                     total,
+                    common_errors,
                     standard_deviation: Duration::from_secs_f64(standard_deviation),
                     number_of_failed_requests,
                 }
