@@ -101,8 +101,9 @@ impl TryFrom<&DRequest> for Request {
 enum RequestStatus {
     Sucess { delay: Duration, url: String },
     HttpParseError,
+    InvalidStatusCode,
     Timeout,
-    Other,
+    Other(Option<String>),
 }
 impl std::fmt::Display for RequestStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,8 +117,9 @@ impl std::fmt::Display for RequestStatus {
                     url
                 ),
                 Self::HttpParseError => "HttpParseError".to_string(),
+                Self::InvalidStatusCode => "Invalid Status Code".to_string(),
                 Self::Timeout => "Timeout".to_string(),
-                Self::Other => "Other".to_string(),
+                Self::Other(s) => format!("Other error: {}", if let Some(s) = s { s } else { "" }),
             }
         )
     }
@@ -182,8 +184,14 @@ async fn get_url(uri: Uri) -> RequestStatus {
             RequestStatus::HttpParseError
         } else if error.is_timeout() {
             RequestStatus::Timeout
+        } else if error.is_parse_status() {
+            RequestStatus::InvalidStatusCode
         } else {
-            RequestStatus::Other
+            RequestStatus::Other(if let Some(cause) = error.into_cause() {
+                Some(cause.to_string())
+            } else {
+                None
+            })
         }
     }
 }
@@ -237,7 +245,8 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                 RequestStatus::Sucess { delay, .. } => duration += *delay,
                 RequestStatus::HttpParseError => return RequestStatus::HttpParseError,
                 RequestStatus::Timeout => return RequestStatus::Timeout,
-                RequestStatus::Other => return RequestStatus::Other,
+                RequestStatus::InvalidStatusCode => return RequestStatus::InvalidStatusCode,
+                RequestStatus::Other(s) => return RequestStatus::Other(s.clone()),
             }
         }
         RequestStatus::Sucess {
@@ -263,8 +272,9 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                     .filter_map(|req| match req {
                         RequestStatus::Sucess { .. } => None,
                         RequestStatus::HttpParseError => Some(RequestStatus::HttpParseError),
+                        RequestStatus::InvalidStatusCode => Some(RequestStatus::InvalidStatusCode),
                         RequestStatus::Timeout => Some(RequestStatus::Timeout),
-                        RequestStatus::Other => Some(RequestStatus::Other),
+                        RequestStatus::Other(s) => Some(RequestStatus::Other(s)),
                     })
                     .collect::<Vec<_>>();
 
