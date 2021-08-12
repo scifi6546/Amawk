@@ -215,10 +215,10 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                 RequestStatus::Other => return RequestStatus::Other,
             }
         }
-        return RequestStatus::Sucess {
+        RequestStatus::Sucess {
             delay: duration,
             url: String::new(),
-        };
+        }
     };
     Statistics {
         clients: data
@@ -227,6 +227,10 @@ fn get_stat(data: &HashMap<String, Vec<Vec<RequestStatus>>>) -> Statistics {
                 let num_sucess = requests
                     .iter()
                     .map(|r_chain| get_chain_status(r_chain))
+                    .filter_map(|req| match req {
+                        RequestStatus::Sucess { delay, .. } => Some(delay),
+                        _ => None,
+                    })
                     .count();
                 let mean = requests
                     .iter()
